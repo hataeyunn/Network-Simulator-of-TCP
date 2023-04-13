@@ -18,7 +18,7 @@ class Buffer:
         return result
 
     def get_first(self) -> Packet:
-        return self.queue[0]렬
+        return self.queue[0]
 
     def print_queue(self, _arg: str = "") -> None:
         result = []
