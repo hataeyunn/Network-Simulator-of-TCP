@@ -1,36 +1,13 @@
-from model import buffer, packet, node
+from model import scheduler, packet, node
 
-client = node.Node()
-server = node.Node()
-for i in range(0, 1000):
-    b1 = packet.Packet(
-        _destination_ip="localhost",
-        _destination_port=5000,
-        _source_ip="localhost",
-        _source_port=5000,
-        _squence_num=100,
-        _protocol="TCP",
-    )
-    b2 = packet.Packet(
-        _destination_ip="localhost",
-        _destination_port=5000,
-        _source_ip="localhost",
-        _source_port=5000,
-        _squence_num=20,
-        _protocol="TCP",
-    )
-    b3 = packet.Packet(
-        _destination_ip="localhost",
-        _destination_port=5000,
-        _source_ip="localhost",
-        _source_port=5000,
-        _squence_num=4,
-        _protocol="TCP",
-    )
+time = 0
 
-a.put(b1)
-a.put(b2)
-a.put(b3)
+schedule = scheduler.Scheduler()
+node_1 = node.Node(0, 1, [], "client")
+node_2 = node.Node(1, 0, [], "server")
 
+schedule.insert_event(scheduler.Event(1, node_1), 50)
+schedule.insert_event(scheduler.Event(1, node_1), 10)
 
-a.print_queue("squence_num")
+print(schedule.get_next_event())
+print(schedule.get_next_event())
