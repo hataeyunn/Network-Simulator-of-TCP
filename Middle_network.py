@@ -30,7 +30,6 @@ def process_data():
         if random.random() < 0.001:
             print("Data loss occurred")
         else:
-            # 전송 성공한 경우 로그 출력
             print(f"Data sent to destination. Size: {len(data)} bytes")
 
 # 데이터 수신 함수
