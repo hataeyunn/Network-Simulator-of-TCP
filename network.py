@@ -1,64 +1,64 @@
 import socket
-import queue
 import threading
-import time
 import random
 
-# 소켓 생성
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+class Network:
+    def __init__(self):
+        self.host = 'localhost'
+        self.client_ports = [5000, 5001, 5002]  # Client ports
+        self.server_port = 6000  # Server port
+        self.queue_locks = [threading.Lock() for _ in range(3)]  # Locks for each queue
+        self.queues = [[] for _ in range(3)]  # Queues for each path
+        self.acks = [[] for _ in range(3)]  # ACK queues for each path
+        self.error_rates = [0.1, 0.2, 0.3]  # Error rates for each path
+        self.rtt_values = [1, 2, 3]  # RTT values for each path
+        self.bandwidths = [1000000, 2000000, 3000000]  # Bandwidths for each path
 
-# 소켓 바인딩
-sock.bind(('localhost', 12345))
+    def start(self):
+        # Start the server thread
+        server_thread = threading.Thread(target=self.start_server)
+        server_thread.start()
 
-# Queue 생성
-q = queue.Queue()
+        # Start the client threads
+        client_threads = []
+        for i in range(3):
+            t = threading.Thread(target=self.receive_packets, args=(self.client_ports[i], i))
+            client_threads.append(t)
+            t.start()
 
-# 데이터 처리 함수
-def process_data():
-    while True:
-        # Queue에서 데이터가 없으면 대기
-        if q.empty():
-            time.sleep(0.1)
-            continue
+        for t in client_threads:
+            t.join()
 
-        # Queue에서 데이터를 꺼내서 전송
-        data = q.get()
-        # 데이터 전송 속도를 10Mbps로 가정하여 전송에 소요되는 시간 계산
-        time.sleep(len(data) * 8 / (10 * 1024 * 1024))
-        #time.sleep(5)
-        # 0.0001의 확률로 데이터 손실 발생
-        if random.random() < 0.001:
-            print("Data loss occurred")
-        else:
-            print(f"Data sent to destination. Size: {len(data)} bytes")
+    def start_server(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
+            server_sock.bind((self.host, self.server_port))
+            server_sock.listen(1)
+            conn, addr = server_sock.accept()
+            with conn:
+                while True:
+                    data = conn.recv(1024)  # Adjust buffer size as needed
+                    if not data:
+                        break
+                    self.process_packet(data)
+                    conn.sendall(b'ACK')  # Send ACK
 
-# 데이터 수신 함수
-def receive_data():
-    while True:
-        # 150 KB 크기의 패킷을 수신
-        data, addr = sock.recvfrom(150 * 1024)
-        if random.random() < 0.001:
-            print("Data loss occurred")
-        else:
-            # 수신한 데이터를 Queue에 추가
-            q.put(data)
-            print(len(q.queue))
-            # 전송 성공한 경우 로그 출력
-            print(f"Data received. Size: {len(data)} bytes")
-        
+    def receive_packets(self, port, index):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.connect((self.host, port))
+            while True:
+                packet = sock.recv(1024)  # Adjust buffer size as needed
+                if not packet:
+                    break
+                if random.random() >= self.error_rates[index]:  # Random drop based on error rate
+                    self.queue_locks[index].acquire()
+                    self.queues[index].append(packet)
+                    self.queue_locks[index].release()
+                time.sleep(0.001)  # Simulate processing delay
 
-# 쓰레드 생성
-t1 = threading.Thread(target=receive_data)
-t2 = threading.Thread(target=process_data)
-
-# 쓰레드 시작
-t1.start()
-t2.start()
-
-# 쓰레드 종료 대기
-t1.join()
-t2.join()
+    def process_packet(self, packet):
+        # Process the received packet and perform any necessary operations
+        pass
 
 
-
-
+network = Network()
+network.start()

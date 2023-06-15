@@ -1,93 +1,48 @@
 import socket
 import threading
-import queue
 import time
 
-# 서버 주소와 포트
-server_address = ("localhost", 5000)
-source_address = ("localhost", 4000)
-# 패킷 번호 초기값
-packet_num = 0
+class Client:
+    def __init__(self):
+        self.host = 'localhost'
+        self.ports = [5000, 5001, 5002]  # Three ports for different paths
+        self.packet_number = 0
+        self.packet_size = 1500
+        self.total_data_size = 10 * 1024 * 1024  # 10MB
+        self.data_sent = 0
+        self.start_time = None
+        self.lock = threading.Lock()
 
-# ACK 패킷을 저장할 큐
-ack_queue = queue.Queue()
+    def start(self):
+        for i in range(3):
+            t = threading.Thread(target=self.send_packets, args=(self.ports[i],))
+            t.start()
 
+    def send_packets(self, port):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.connect((self.host, port))
+            while self.data_sent < self.total_data_size:
+                self.lock.acquire()
+                packet = self.generate_packet()
+                self.data_sent += self.packet_size
+                if self.start_time is None:
+                    self.start_time = time.time()
+                self.lock.release()
+                sock.sendall(packet)
+                time.sleep(0.001)  # Simulate transmission delay
 
-# 송신 함수
-def send_packet():
-    global packet_num
+            if self.data_sent >= self.total_data_size:
+                elapsed_time = time.time() - self.start_time
+                throughput = self.total_data_size / elapsed_time
+                latency = elapsed_time / (self.total_data_size / self.packet_size)
+                print(f"Throughput: {throughput} bytes/sec")
+                print(f"Latency: {latency} sec")
+                # Perform any necessary cleanup and exit
 
-    # 소켓 생성
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    while True:
-        # 패킷 생성
-        packet = [
-            server_address[0],
-            server_address[1],
-            packet_num,
-            0,
-            source_address[0],
-            source_address[1],
-        ]
-
-        # 리스트를 문자열로 변환하여 송신
-        packet_str = ",".join(str(e) for e in packet)
-        sock.sendto(packet_str.encode(), server_address)
-
-        # 보낸 패킷을 큐에 추가
-        ack_queue.put(packet_num)
-
-        # 패킷 번호 증가
-        packet_num += 1
-
-        # 1초 대기
-        time.sleep(1)
-
-    # 소켓 닫기
-    sock.close()
+    def generate_packet(self):
+        self.packet_number += 1
+        return f"Packet {self.packet_number}".encode()
 
 
-# 수신 함수
-def receive_packet():
-    # 소켓 생성
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("localhost", 4000))
-
-    while True:
-        # 패킷 수신
-        data, addr = sock.recvfrom(1024)
-
-        # 문자열을 리스트로 변환
-        packet = [int(e) for e in data.decode().split(",")]
-
-        # ACK 패킷인 경우
-        if packet[3] == 1:
-            # 해당 패킷 번호를 큐에서 제거
-            if not ack_queue.empty() and ack_queue.queue[0] == packet[2]:
-                ack_queue.get()
-        # ACK 패킷이 아닌 경우
-        else:
-            # ACK 패킷 생성하여 송신
-            ack_packet = [
-                server_address[0],
-                server_address[1],
-                packet[2],
-                1,
-                source_address[0],
-                source_address[1],
-            ]
-            ack_packet_str = ",".join(str(e) for e in ack_packet)
-            sock.sendto(ack_packet_str.encode(), server_address)
-
-    # 소켓 닫기
-    sock.close()
-
-
-# 송신 스레드 시작
-send_thread = threading.Thread(target=send_packet)
-send_thread.start()
-
-# 수신 스레드 시작
-receive_thread = threading.Thread(target=receive_packet)
-receive_thread.start()
+client = Client()
+client.start()
