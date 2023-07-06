@@ -10,27 +10,23 @@ class Client:
         self.packet_number = 0
         self.window_sizes = [initial_window_size] * num_paths
 
-    def send(self):
+    def send(self, path_index):
         while True:
-            for i in range(len(self.window_sizes)):
-                for _ in range(int(self.window_sizes[i])):
-                    self.packet_number += 1
-                    data = (self.packet_number, 'This is packet %d' % self.packet_number, i)
-                    print(f"{self.env.now}s: {data[0]} packet using path {i} ")
-                    self.network.send(data)
-
-            yield self.env.timeout(1)  # 매 1초마다 패킷을 생성
-            yield self.env.process(self.receive_ack())
+            for _ in range(int(self.window_sizes[path_index])):
+                self.packet_number += 1
+                data = (self.packet_number, 'This is packet %d' % self.packet_number, path_index)
+                print(f"{self.env.now}s: {data[0]} packet using path {path_index} ")
+                self.network.send(data)
+            yield self.env.timeout(0.1)  # TODO 수정해야함 패킷을 전송한 후 1초 대기
 
     def receive_ack(self):
-        while self.acks.items:
+        while True:
             ack = yield self.acks.get()
-            # 혼잡창 크기 조정
+            # 혼잡창 크기 조정 알고리즘 구현
             if ack[0] % 10 == 0:
                 self.window_sizes[ack[2]] /= 2  # 혼잡창을 절반으로 줄임
             else:
                 self.window_sizes[ack[2]] += 1  # 혼잡창을 증가시킴
-
 
 
 class Network:
@@ -50,22 +46,16 @@ class Network:
             self.env.process(self._path_run(i))
 
     def _path_run(self, path_index):
-        last_transmission_end_time = 0
         while True:
             data = yield self.incoming_queues[path_index].get()
             bandwidth, latency, error_rate = self.path_characteristics[path_index]
             packet_size = 1500  # bytes
             transmission_time = packet_size / bandwidth  # Calculate transmission time
 
-            if self.env.now < last_transmission_end_time:
-                delay = max(0, last_transmission_end_time - self.env.now + latency)
-            else:
-                delay = transmission_time + latency
-
-            last_transmission_end_time = self.env.now + delay
-
             if random.random() > error_rate:  # If not error
-                yield self.env.timeout(delay)  # Transmission delay + latency
+                # 패킷이 도착하자마자 latency를 적용하고, 그 후에 패킷을 전송합니다.
+                yield self.env.timeout(latency)  # Apply latency immediately when packet arrives
+                yield self.env.timeout(transmission_time)  # Transmission delay
                 self.server.receive(data)
 
 
@@ -99,9 +89,13 @@ path_characteristics = [(1000, 1, 0.01), (500, 2, 0.02), (2000, 0.5, 0.005)]  # 
 acks = simpy.Store(env)
 server = Server(env, acks, path_characteristics)
 network = Network(env, server, path_characteristics)
+# 코드 실행 부분
 client = Client(env, network, acks, num_paths=num_paths)
 
-env.process(client.send())
+for i in range(num_paths):
+    env.process(client.send(i))
+env.process(client.receive_ack())
+
 network.run()
 env.run(until=10)
 
