@@ -2,6 +2,9 @@ import simpy
 import random
 from collections import deque
 
+class scheduler:
+    def __init__(self):
+        self.queue
 class Client:
     def __init__(self, env, network, acks, num_paths, packet_size=1500, initial_window_size=1):
         self.env = env
@@ -96,13 +99,11 @@ class Server:
             ack = self.ack_queues[path_index].popleft()
             bandwidth, latency, error_rate = self.path_characteristics[path_index]
             packet_size = 1500  # bytes
+            transmission_delay = packet_size / bandwidth  # Fixed transmission delay
 
             if random.random() > error_rate:  # If not error
-                random.seed()
-                transmission_delay = random.uniform(0, bandwidth/packet_size)
-                transmission_delay = 0
-                yield self.env.timeout(max(0, self.packet_arrival_times[ack[0]] - self.env.now))  # Wait until the packet arrival time
-                yield self.env.timeout(transmission_delay + latency)  # Transmission delay
+                yield self.env.timeout(transmission_delay)  # Transmission delay
+                yield self.env.timeout(latency)
                 self.acks.put(ack)
                 print(f"At time {self.env.now}s: ACK of packet {ack[0]} arrived using path {ack[2]}")
         self.is_sending_ack[path_index] = False
