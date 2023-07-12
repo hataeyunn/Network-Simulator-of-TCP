@@ -1,15 +1,44 @@
 import simpy
 import random
 from collections import deque
+import heapq
 
-class scheduler:
-    def __init__(self):
-        self.queue
+class Task:
+    def __init__(self, time, func):
+        assert callable(func), "func must be a callable function, not a generator"
+        self.time = time
+        self.func = func
+
+    def __lt__(self, other):
+        return self.time < other.time
+
+
+class Scheduler:
+    def __init__(self, env):
+        self.env = env
+        self.priority_queue = []
+
+    def add_task(self, task_time, task):
+        heapq.heappush(self.priority_queue, (task_time, task))
+
+    def schedule(self):
+        while True:
+            if not self.priority_queue:
+                yield self.env.timeout(0.0001)
+                continue
+
+            task_time, task = heapq.heappop(self.priority_queue)
+            if self.env.now < task_time:
+                yield self.env.timeout(task_time - self.env.now)
+
+            task.func()
+
 class Client:
-    def __init__(self, env, network, acks, num_paths, packet_size=1500, initial_window_size=1):
+    def __init__(self, env, network, acks, scheduler, num_paths, packet_size=1500, initial_window_size=1):
         self.env = env
         self.network = network
         self.acks = acks
+        self.scheduler = scheduler
         self.packet_size = packet_size
         self.packet_number = 0
         self.window_sizes = [initial_window_size] * num_paths
@@ -19,7 +48,9 @@ class Client:
             self.packet_number += 1
             data = (self.packet_number, 'This is packet %d' % self.packet_number, path_index)
             print(f"At time {self.env.now}s: {data[0]} packet using path {path_index} ")
-            self.network.send(data)
+
+            task = Task(self.env.now, lambda: self.network.send(data))
+            self.scheduler.add_task(task.time, task)
 
     def receive_ack_and_send(self):
         while True:
@@ -39,7 +70,7 @@ class Client:
 
 
 class Network:
-    def __init__(self, env, server, path_characteristics):
+    def __init__(self, env, server, path_characteristics, scheduler):
         self.env = env
         self.server = server
         self.path_characteristics = path_characteristics
@@ -47,12 +78,14 @@ class Network:
         self.incoming_queues = [simpy.Store(env) for _ in range(self.num_paths)]
         self.packet_queues = [deque() for _ in range(self.num_paths)]
         self.is_transmitting = [False for _ in range(self.num_paths)]
+        self.scheduler = scheduler
 
     def send(self, data):
         path_index = data[2]
         self.packet_queues[path_index].append(data)
         if not self.is_transmitting[path_index]:
-            self.env.process(self._path_run(path_index))
+            task = Task(self.env.now, lambda: self._path_run(path_index))
+            self.scheduler.add_task(task.time, task)
 
     def _path_run(self, path_index):
         self.is_transmitting[path_index] = True
@@ -64,9 +97,9 @@ class Network:
 
             if random.random() > error_rate:  # If not error
                 # 패킷이 도착하자마자 latency/2를 적용하고, 그 후에 패킷을 전송합니다.
-                yield self.env.timeout(latency)  # Apply latency/2 immediately when packet arrives
-                yield self.env.timeout(transmission_time)  # Transmission delay
-                self.server.receive(data)
+                task1 = Task(self.env.now + latency, lambda: self.server.receive(data))
+                self.scheduler.add_task(task1.time, task1)
+
         self.is_transmitting[path_index] = False
 
     def run(self):
@@ -74,11 +107,12 @@ class Network:
             self.env.process(self._path_run(i))
 
 class Server:
-    def __init__(self, env, acks, path_characteristics):
+    def __init__(self, env, acks, path_characteristics,scheduler):
         self.env = env
         self.received_data = []
         self.acks = acks
         self.path_characteristics = path_characteristics
+        self.scheduler = scheduler
         self.ack_queues = [deque() for _ in range(len(path_characteristics))]
         self.is_sending_ack = [False for _ in range(len(path_characteristics))]
         self.packet_arrival_times = {}  # To record the arrival times of packets
@@ -89,9 +123,9 @@ class Server:
             print(f"At time {self.env.now}s: received packet number: {data[0]} on path {data[2]}")
         ack = (data[0], 'ACK for packet %d' % data[0], data[2])
         self.ack_queues[data[2]].append(ack)
-        self.packet_arrival_times[data[0]] = self.env.now  # Record the packet arrival time
         if not self.is_sending_ack[data[2]]:
-            self.env.process(self.send_ack(data[2]))
+            task = Task(self.env.now, lambda: self.send_ack(data[2]))
+            self.scheduler.add_task(task.time, task)
 
     def send_ack(self, path_index):
         self.is_sending_ack[path_index] = True
@@ -102,27 +136,26 @@ class Server:
             transmission_delay = packet_size / bandwidth  # Fixed transmission delay
 
             if random.random() > error_rate:  # If not error
-                yield self.env.timeout(transmission_delay)  # Transmission delay
-                yield self.env.timeout(latency)
-                self.acks.put(ack)
+                task2 = Task(self.env.now + latency, lambda: self.acks.put(ack))
+                self.scheduler.add_task(task2.time, task2)
                 print(f"At time {self.env.now}s: ACK of packet {ack[0]} arrived using path {ack[2]}")
+
         self.is_sending_ack[path_index] = False
 
 
 env = simpy.Environment()
+scheduler = Scheduler(env)
 
 num_paths = 3
 path_characteristics = [(1000, 1, 0.01), (500, 2, 0.02), (2000, 0.5, 0.005)]  # (bandwidth, latency, error_rate) for each path
 acks = simpy.Store(env)
-server = Server(env, acks, path_characteristics)
-network = Network(env, server, path_characteristics)
-# 코드 실행 부분
-client = Client(env, network, acks, num_paths=num_paths)
+server = Server(env, acks, path_characteristics, scheduler)
+network = Network(env, server, path_characteristics, scheduler)
+client = Client(env, network, acks, scheduler, num_paths=num_paths)
 
 for i in range(num_paths):
     client.send(i)
-env.process(client.receive_ack_and_send())
 
-network.run()
+scheduler.add_task(0, Task(0, client.receive_ack_and_send))
+env.process(scheduler.schedule())
 env.run(until=10)
-
