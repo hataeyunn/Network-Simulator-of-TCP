@@ -1,42 +1,102 @@
 import simpy
 import random
 from collections import deque
+import heapq
+import matplotlib.pyplot as plt
+
+
+class Task:
+    def __init__(self, time, func, name, *args):
+        assert callable(func), "func must be a callable function, not a generator"
+        self.time = time
+        self.func = func
+        self.name = name
+        self.args = args
+
+    def __lt__(self, other):
+        return self.time < other.time
+
+
+class Scheduler:
+    def __init__(self, env):
+        self.env = env
+        self.priority_queue = []
+
+    def add_task(self, task_time, task):
+        heapq.heappush(self.priority_queue, (task_time, task))
+
+    def schedule(self):
+        while True:
+            if not self.priority_queue:
+                yield self.env.timeout(0.0001)
+                continue
+
+            task_time, task = heapq.heappop(self.priority_queue)
+            #print(f"At time {self.env.now}s: Task Name: {task.name}, Function: {task.func}")
+            if self.env.now < task_time:
+                yield self.env.timeout(task_time - self.env.now)
+
+            task.func(*task.args)
+
 
 class Client:
-    def __init__(self, env, network, acks, num_paths, packet_size=1500, initial_window_size=1):
+    def __init__(self, env, network, acks, scheduler, num_paths, packet_size=1500, initial_window_size=1):
         self.env = env
         self.network = network
         self.acks = acks
+        self.scheduler = scheduler
         self.packet_size = packet_size
         self.packet_number = 0
         self.window_sizes = [initial_window_size] * num_paths
+        self.inflight_packets = [0] * num_paths  # To keep track of inflight packets
+        self.window_size_logs = [[] for _ in range(num_paths)]  # To log window size changes
+
 
     def send(self, path_index):
         for _ in range(int(self.window_sizes[path_index])):
             self.packet_number += 1
             data = (self.packet_number, 'This is packet %d' % self.packet_number, path_index)
             print(f"At time {self.env.now}s: {data[0]} packet using path {path_index} ")
-            self.network.send(data)
+
+            task = Task(self.env.now, self.network.send, "Send Packet", data)
+            self.scheduler.add_task(task.time, task)
+
+    def receive_ack(self, ack):
+        print(f"At time {self.env.now}s: ACK of packet {ack[0]} arrived using path {ack[2]}")
 
     def receive_ack_and_send(self):
         while True:
             ack = yield self.acks.get()
-            # 혼잡창 크기 조정 알고리즘 구현
-            if ack[0] % 10 == 0:
-                self.window_sizes[ack[2]] /= 2  # 혼잡창을 절반으로 줄임
-            else:
-                self.window_sizes[ack[2]] += 1  # 혼잡창을 증가시킴
+            self.receive_ack(ack)
+            self.inflight_packets[ack[2]] -= 1  # ACK received, decrement inflight packets
 
-            # 혼잡 제어 창 크기만큼 패킷을 전송
-            for _ in range(int(self.window_sizes[ack[2]])):
+            if ack[0] % 10 == 0:
+                self.window_sizes[ack[2]] /= 2
+            else:
+                self.window_sizes[ack[2]] += 1
+
+            # Record the window size change
+            self.window_size_logs[ack[2]].append((self.env.now, self.window_sizes[ack[2]]))
+
+
+            # Calculate the number of available slots in the congestion window
+            available_slots = int(self.window_sizes[ack[2]]) - self.inflight_packets[ack[2]]
+            if available_slots > 0:
                 self.packet_number += 1
                 data = (self.packet_number, 'This is packet %d' % self.packet_number, ack[2])
                 print(f"At time {self.env.now}s: {data[0]} packet using path {ack[2]} ")
-                self.network.send(data)
+                task = Task(self.env.now, self.network.send, "Send Packet After Receiving ACK", data)
+                self.scheduler.add_task(task.time, task)
+                self.inflight_packets[ack[2]] += 1  # Increment inflight packets
+    def start_sending(self):
+        for i in range(num_paths):
+            self.send(i)
+
+        env.process(self.receive_ack_and_send())
 
 
 class Network:
-    def __init__(self, env, server, path_characteristics):
+    def __init__(self, env, server, path_characteristics, scheduler):
         self.env = env
         self.server = server
         self.path_characteristics = path_characteristics
@@ -44,12 +104,14 @@ class Network:
         self.incoming_queues = [simpy.Store(env) for _ in range(self.num_paths)]
         self.packet_queues = [deque() for _ in range(self.num_paths)]
         self.is_transmitting = [False for _ in range(self.num_paths)]
+        self.scheduler = scheduler
 
     def send(self, data):
         path_index = data[2]
         self.packet_queues[path_index].append(data)
         if not self.is_transmitting[path_index]:
-            self.env.process(self._path_run(path_index))
+            task = Task(self.env.now, self._path_run, "Start Path Run", path_index)
+            self.scheduler.add_task(task.time, task)
 
     def _path_run(self, path_index):
         self.is_transmitting[path_index] = True
@@ -60,22 +122,24 @@ class Network:
             transmission_time = packet_size / bandwidth  # Calculate transmission time
 
             if random.random() > error_rate:  # If not error
-                # 패킷이 도착하자마자 latency/2를 적용하고, 그 후에 패킷을 전송합니다.
-                yield self.env.timeout(latency)  # Apply latency/2 immediately when packet arrives
-                yield self.env.timeout(transmission_time)  # Transmission delay
-                self.server.receive(data)
+                task1 = Task(self.env.now + transmission_time + latency, self.server.receive, "Server Receives Packet", data)
+                self.scheduler.add_task(task1.time, task1)
+
         self.is_transmitting[path_index] = False
 
     def run(self):
         for i in range(self.num_paths):
-            self.env.process(self._path_run(i))
+            task = Task(self.env.now, self._path_run, "Run Path", i)
+            self.scheduler.add_task(task.time, task)
+
 
 class Server:
-    def __init__(self, env, acks, path_characteristics):
+    def __init__(self, env, acks, path_characteristics, scheduler):
         self.env = env
         self.received_data = []
         self.acks = acks
         self.path_characteristics = path_characteristics
+        self.scheduler = scheduler
         self.ack_queues = [deque() for _ in range(len(path_characteristics))]
         self.is_sending_ack = [False for _ in range(len(path_characteristics))]
         self.packet_arrival_times = {}  # To record the arrival times of packets
@@ -86,9 +150,9 @@ class Server:
             print(f"At time {self.env.now}s: received packet number: {data[0]} on path {data[2]}")
         ack = (data[0], 'ACK for packet %d' % data[0], data[2])
         self.ack_queues[data[2]].append(ack)
-        self.packet_arrival_times[data[0]] = self.env.now  # Record the packet arrival time
         if not self.is_sending_ack[data[2]]:
-            self.env.process(self.send_ack(data[2]))
+            task = Task(self.env.now, self.send_ack, "Send ACK", data[2])
+            self.scheduler.add_task(task.time, task)
 
     def send_ack(self, path_index):
         self.is_sending_ack[path_index] = True
@@ -96,32 +160,40 @@ class Server:
             ack = self.ack_queues[path_index].popleft()
             bandwidth, latency, error_rate = self.path_characteristics[path_index]
             packet_size = 1500  # bytes
+            transmission_delay = packet_size / bandwidth  # Fixed transmission delay
 
             if random.random() > error_rate:  # If not error
-                random.seed()
-                transmission_delay = random.uniform(0, bandwidth/packet_size)
-                transmission_delay = 0
-                yield self.env.timeout(max(0, self.packet_arrival_times[ack[0]] - self.env.now))  # Wait until the packet arrival time
-                yield self.env.timeout(transmission_delay + latency)  # Transmission delay
-                self.acks.put(ack)
-                print(f"At time {self.env.now}s: ACK of packet {ack[0]} arrived using path {ack[2]}")
+                task2 = Task(self.env.now + transmission_delay + latency, self.acks.put, "Client Receives ACK",
+                             ack)  # Here we call client's receive_ack function
+                self.scheduler.add_task(task2.time, task2)
+
         self.is_sending_ack[path_index] = False
 
 
 env = simpy.Environment()
+scheduler = Scheduler(env)
 
 num_paths = 3
-path_characteristics = [(1000, 1, 0.01), (500, 2, 0.02), (2000, 0.5, 0.005)]  # (bandwidth, latency, error_rate) for each path
+path_characteristics = [(1000, 1, 0), (1000, 1, 0), (1000, 1 , 0)]  # (bandwidth, latency, error_rate) for each path
 acks = simpy.Store(env)
-server = Server(env, acks, path_characteristics)
-network = Network(env, server, path_characteristics)
-# 코드 실행 부분
-client = Client(env, network, acks, num_paths=num_paths)
+server = Server(env, acks, path_characteristics, scheduler)
+network = Network(env, server, path_characteristics, scheduler)
+client = Client(env, network, acks, scheduler, num_paths=num_paths)
+client.start_sending()
 
-for i in range(num_paths):
-    client.send(i)
+# Let's start the process for client to receive ack and send packets
 env.process(client.receive_ack_and_send())
 
-network.run()
-env.run(until=10)
+scheduler_process = env.process(scheduler.schedule())
 
+env.run(until=100)
+for path_index in range(num_paths):
+    times, window_sizes = zip(*client.window_size_logs[path_index])
+    plt.plot(times, window_sizes, label=f'Path {path_index + 1}')
+
+plt.title('Congestion Window Size Over Time')
+plt.xlabel('Time (s)')
+plt.ylabel('Window Size')
+plt.legend()
+plt.show()
+print(f"Server received data: {server.received_data}")
