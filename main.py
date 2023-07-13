@@ -78,7 +78,6 @@ class Client:
             # Record the window size change
             self.window_size_logs[ack[2]].append((self.env.now, self.window_sizes[ack[2]]))
 
-
             # Calculate the number of available slots in the congestion window
             available_slots = int(self.window_sizes[ack[2]]) - self.inflight_packets[ack[2]]
             if available_slots > 0:
